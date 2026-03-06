@@ -1,43 +1,33 @@
 # Frontend Integration Guide
 
-## Backend Auth Endpoints
+This guide reflects the current backend behavior.
 
-Your frontend (`smp-frontend`) should call these endpoints:
+## Base URL
+
+Default backend URL:
+
+`http://localhost:5000`
+
+## Auth Endpoints
 
 ### Register
 **POST** `http://localhost:5000/api/auth/register`
 
-**Request Body:**
+Required request body:
+
 ```json
 {
   "email": "user@example.com",
   "password": "password123",
   "firstName": "John",
   "lastName": "Doe",
-  "phone": "1234567890"
+  "phone": "9000000099"
 }
 ```
-
-**Response (201):**
-```json
-{
-  "message": "User registered successfully"
-}
-```
-
-**Response (409):**
-```json
-{
-  "message": "User already exists"
-}
-```
-
----
 
 ### Login
 **POST** `http://localhost:5000/api/auth/login`
 
-**Request Body:**
 ```json
 {
   "email": "user@example.com",
@@ -45,144 +35,61 @@ Your frontend (`smp-frontend`) should call these endpoints:
 }
 ```
 
-**Response (200):**
+Success response:
+
 ```json
 {
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  "token": "<jwt-token>"
 }
 ```
 
-**Response (400):**
-```json
-{
-  "message": "Invalid credentials"
-}
+### Verify Email
+**GET** `http://localhost:5000/api/auth/verify?token=<token>`
+
+### Forgot / Reset Password
+- **POST** `http://localhost:5000/api/auth/forgot-password`
+- **POST** `http://localhost:5000/api/auth/reset-password`
+
+## Token Usage
+
+Include JWT in protected calls:
+
+```http
+Authorization: Bearer <token>
 ```
 
----
+## Existing Frontend Auth Service
 
-## Frontend Implementation Steps
+Use [src/services/authService.js](../smp-frontend/src/services/authService.js) in frontend.
 
-### 1. Create an Auth Service (e.g., `src/services/authService.js`)
+Notes:
+- stores token in `localStorage` as `token`
+- exposes `register`, `login`, `logout`, `getToken`, `isLoggedIn`
+- auto-logout on expired token checks
 
-```javascript
-const API_URL = 'http://localhost:5000/api/auth';
+## API Config in Frontend
 
-export const authService = {
-  async register(email, password, firstName = '', lastName = '', phone = '') {
-    const res = await fetch(`${API_URL}/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, firstName, lastName, phone }),
-    });
-    return res.json();
-  },
+Configured in [src/config/api.js](../smp-frontend/src/config/api.js):
 
-  async login(email, password) {
-    const res = await fetch(`${API_URL}/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
-    const data = await res.json();
-    if (res.ok && data.token) {
-      localStorage.setItem('token', data.token);
-    }
-    return data;
-  },
+- `VITE_API_URL` from env, fallback `http://localhost:5000`
 
-  logout() {
-    localStorage.removeItem('token');
-  },
+## Admin Test Account
 
-  getToken() {
-    return localStorage.getItem('token');
-  },
+- Email: `admin@nexus.com`
+- Password: `admin@nexus`
 
-  isLoggedIn() {
-    return !!localStorage.getItem('token');
-  },
-};
-```
+## Demo User Accounts
 
-### 2. Use in Login Component
+All seeded demo users share password: `User@1234`
 
-```javascript
-import { authService } from './services/authService';
-
-// In your login handler:
-async function handleLogin(email, password) {
-  try {
-    const data = await authService.login(email, password);
-    if (data.token) {
-      // Redirect to dashboard or home
-      window.location.href = '/dashboard';
-    } else {
-      alert(data.message || 'Login failed');
-    }
-  } catch (err) {
-    alert('Error: ' + err.message);
-  }
-}
-```
-
-### 3. Use in Register Component
-
-```javascript
-async function handleRegister(email, password, firstName, lastName) {
-  try {
-    const data = await authService.register(email, password, firstName, lastName);
-    if (data.message.includes('successfully')) {
-      alert('Registered! Now log in.');
-      // Redirect to login
-    } else {
-      alert(data.message);
-    }
-  } catch (err) {
-    alert('Error: ' + err.message);
-  }
-}
-```
-
-### 4. Add Token to Protected Requests
-
-When calling other APIs, include the token:
-
-```javascript
-const token = authService.getToken();
-const res = await fetch('http://localhost:5000/api/posts', {
-  method: 'GET',
-  headers: {
-    'Authorization': `Bearer ${token}`,
-    'Content-Type': 'application/json',
-  },
-});
-```
-
-### 5. (Optional) Add Protected Route Guard
-
-```javascript
-function ProtectedRoute({ component: Component }) {
-  return authService.isLoggedIn() ? <Component /> : <Navigate to="/login" />;
-}
-```
-
----
-
-## Admin Account (Pre-seeded)
-
-- **Email:** `admin@nexus.com`
-- **Password:** `admin@nexus`
-- **Verified:** Yes
-- **Role:** ADMIN
-
-Use this to test login.
-
----
-
-## Notes
-
-- **CORS:** Backend allows all origins by default. For production, restrict to your frontend domain in `src/app.js`.
-- **JWT Token:** Stored in `localStorage`. Include it in `Authorization: Bearer <token>` header for protected routes.
-- **Port:** Backend runs on `http://localhost:5000` (or your `PORT` env var).
+- `aisha.khan@nexus.com`
+- `arjun.patel@nexus.com`
+- `meera.iyer@nexus.com`
+- `rohan.sharma@nexus.com`
+- `sara.fernandez@nexus.com`
+- `vivaan.mehta@nexus.com`
+- `nina.dsouza@nexus.com`
+- `kabir.verma@nexus.com`
+- `priya.singh@nexus.com`
+- `dev.kumar@nexus.com`
 
