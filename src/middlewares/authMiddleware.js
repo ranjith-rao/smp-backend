@@ -21,6 +21,23 @@ const verifyToken = (req, res, next) => {
   }
 };
 
+const optionalAuth = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return next();
+  }
+
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET || 'change-me');
+  } catch (error) {
+    req.user = null;
+  }
+
+  return next();
+};
+
 const isAdmin = (req, res, next) => {
   // This runs AFTER verifyToken, so req.user is already populated
   if (req.user && req.user.role === 'ADMIN') {
@@ -30,4 +47,4 @@ const isAdmin = (req, res, next) => {
   }
 };
 
-module.exports = { verifyToken, isAdmin };
+module.exports = { verifyToken, optionalAuth, isAdmin };

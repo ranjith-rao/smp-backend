@@ -17,16 +17,263 @@ enum Role {
   ADMIN
 }
 
+enum ReportStatus {
+  PENDING
+  RESOLVED
+  DISMISSED
+}
+
+enum ConversationType {
+  DIRECT
+  GROUP
+}
+
+enum ConversationRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  SYSTEM
+}
+
+enum PageReportReason {
+  INAPPROPRIATE
+  SPAM
+  HARASSMENT
+  COPYRIGHT
+  OTHER
+}
+
 model User {
   id                Int      @id @default(autoincrement())
   firstName         String
   lastName          String
+  username          String?
   email             String   @unique
   phone             String   @unique
   password          String
   role              Role     @default(USER)
   isVerified        Boolean  @default(false)
   isBlocked         Boolean  @default(false)
+  isDeleted         Boolean  @default(false)
   verificationToken String?
+  profileImageUrl   String?
+  bio               String?
+  resetToken        String?
+  resetTokenExpiry  DateTime?
+  lastSeenAt        DateTime?
   createdAt         DateTime @default(now())
+  posts             Post[]
+  likes             Like[]
+  comments          Comment[]
+  followers         Follow[] @relation("followers")
+  following         Follow[] @relation("following")
+  pagesOwned        Page[]   @relation("PageOwner")
+  pageFollowers     PageFollower[]
+  pageReports       PageReport[]
+  conversationsCreated Conversation[]            @relation("ConversationCreator")
+  conversationParticipants ConversationParticipant[]
+  sentMessages         Message[]                 @relation("MessageSender")
+}
+
+model Post {
+  id         Int      @id @default(autoincrement())
+  content    String?
+  feeling    String?
+  mediaType  String?
+  mediaUrl   String?
+  isHidden   Boolean  @default(false) // Added for reversible moderation
+  createdAt  DateTime @default(now())
+  userId     Int
+  pageId     Int?
+  user       User     @relation(fields: [userId], references: [id])
+  page       Page?    @relation("PagePosts", fields: [pageId], references: [id], onDelete: Cascade)
+  reports    Report[]
+  likes      Like[]
+  comments   Comment[]
+}
+
+model Like {
+  id        Int      @id @default(autoincrement())
+  postId    Int
+  userId    Int
+  createdAt DateTime @default(now())
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([postId, userId])
+}
+
+model Comment {
+  id                Int      @id @default(autoincrement())
+  content           String
+  postId            Int
+  userId            Int
+  parentCommentId   Int?
+  isHidden          Boolean  @default(false) // Added for reversible moderation
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
+  post              Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replies           Comment[] @relation("replies")
+  parentComment     Comment? @relation("replies", fields: [parentCommentId], references: [id], onDelete: Cascade)
+  reports           CommentReport[]
+}
+
+model Report {
+  id        Int          @id @default(autoincrement())
+  postId    Int
+  userId    Int
+  reason    String
+  status    ReportStatus @default(PENDING)
+  createdAt DateTime     @default(now())
+  post      Post         @relation(fields: [postId], references: [id])
+}
+
+model CommentReport {
+  id        Int          @id @default(autoincrement())
+  commentId Int
+  userId    Int
+  reason    String
+  status    ReportStatus @default(PENDING)
+  createdAt DateTime     @default(now())
+  comment   Comment      @relation(fields: [commentId], references: [id], onDelete: Cascade)
+}
+
+model Follow {
+  id          Int      @id @default(autoincrement())
+  followerId  Int
+  followingId Int
+  createdAt   DateTime @default(now())
+  follower    User     @relation("followers", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("following", fields: [followingId], references: [id], onDelete: Cascade)
+  @@unique([followerId, followingId])
+}
+
+model Page {
+  id              Int      @id @default(autoincrement())
+  name            String   @unique
+  slug            String   @unique
+  description     String   @db.Text
+  category        String
+  bannerImageUrl  String?
+  profileImageUrl String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  ownerId         Int
+  owner           User     @relation("PageOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  posts           Post[]   @relation("PagePosts")
+  followers       PageFollower[]
+  reports         PageReport[]
+}
+
+model PageFollower {
+  id        Int      @id @default(autoincrement())
+  pageId    Int
+  userId    Int
+  createdAt DateTime @default(now())
+  page      Page     @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([pageId, userId])
+}
+
+model PageReport {
+  id          Int                @id @default(autoincrement())
+  pageId      Int
+  reportedById Int
+  reason      PageReportReason
+  description String?            @db.Text
+  status      ReportStatus       @default(PENDING)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  page        Page               @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  reportedBy  User               @relation(fields: [reportedById], references: [id], onDelete: Cascade)
+}
+
+model Setting {
+  key   String @id
+  value String
+}
+
+model ContactQuery {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String
+  subject   String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Conversation {
+  id               Int               @id @default(autoincrement())
+  type             ConversationType
+  name             String?
+  avatarUrl        String?
+  directKey        String?           @unique
+  createdById      Int
+  lastMessageId    Int?
+  lastMessageAt    DateTime          @default(now())
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @default(now()) @updatedAt
+  createdBy        User              @relation("ConversationCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  participants     ConversationParticipant[]
+  messages         Message[]
+  lastMessage      Message?          @relation("ConversationLastMessage", fields: [lastMessageId], references: [id], onDelete: SetNull)
+
+  @@index([lastMessageAt])
+}
+
+model ConversationParticipant {
+  id                Int          @id @default(autoincrement())
+  conversationId    Int
+  userId            Int
+  role              ConversationRole @default(MEMBER)
+  unreadCount       Int          @default(0)
+  lastReadMessageId Int?
+  isMuted           Boolean      @default(false)
+  joinedAt          DateTime     @default(now())
+  leftAt            DateTime?
+  conversation      Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId, unreadCount])
+}
+
+model Message {
+  id                   Int          @id @default(autoincrement())
+  conversationId       Int
+  senderId             Int
+  messageType          MessageType  @default(TEXT)
+  text                 String?
+  isRead               Boolean      @default(false)
+  isDeletedForEveryone Boolean      @default(false)
+  readAt               DateTime?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @default(now()) @updatedAt
+  conversation         Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender               User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  attachments          MessageAttachment[]
+  lastMessageForConversations Conversation[] @relation("ConversationLastMessage")
+
+  @@index([conversationId, createdAt])
+}
+
+model MessageAttachment {
+  id           Int      @id @default(autoincrement())
+  messageId    Int
+  fileName     String
+  mimeType     String
+  sizeBytes    Int
+  url          String
+  thumbnailUrl String?
+  createdAt    DateTime @default(now())
+  message      Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
 }
