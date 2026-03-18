@@ -185,6 +185,33 @@ router.get('/following/list', verifyToken, async (req, res) => {
   }
 });
 
+// Get current user's friends list (people the user follows)
+router.get('/friends/list', verifyToken, async (req, res) => {
+  const userId = req.user.userId;
+
+  try {
+    const result = await pool.query(
+      `SELECT u.id, u."firstName", u."lastName", u."username", u.email, u."profileImageUrl"
+       FROM "User" u
+       WHERE u.id IN (
+         SELECT f."followingId"
+         FROM "Follow" f
+         WHERE f."followerId" = $1
+       )
+         AND u."isVerified" = true
+         AND u."isBlocked" = false
+         AND u."isDeleted" = false
+         AND u.role != 'ADMIN'
+       ORDER BY u."firstName" ASC, u."lastName" ASC`,
+      [userId]
+    );
+
+    res.json({ friends: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ===== ADMIN-ONLY ROUTES (Require both authentication and admin role) =====
 
 router.get('/all', verifyToken, isAdmin, async (req, res) => {

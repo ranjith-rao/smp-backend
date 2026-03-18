@@ -213,7 +213,9 @@ model Conversation {
   id               Int               @id @default(autoincrement())
   type             ConversationType
   name             String?
+  groupName        String?
   avatarUrl        String?
+  profileImageUrl  String?
   directKey        String?           @unique
   createdById      Int
   lastMessageId    Int?

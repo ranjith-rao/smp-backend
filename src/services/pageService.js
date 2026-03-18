@@ -84,27 +84,7 @@ const getPageById = async (pageId) => {
     [page.ownerId]
   );
   page.owner = ownerResult.rows[0];
-  
-  // Get admins
-  const adminsResult = await pool.query(
-    `SELECT pa.*, u.id as "userId", u."firstName", u."lastName", u."profileImageUrl"
-     FROM "PageAdmin" pa
-     JOIN "User" u ON pa."userId" = u.id
-     WHERE pa."pageId" = $1`,
-    [pageId]
-  );
-  page.admins = adminsResult.rows.map(row => ({
-    id: row.id,
-    pageId: row.pageId,
-    userId: row.userId,
-    role: row.role,
-    user: {
-      id: row.userId,
-      firstName: row.firstName,
-      lastName: row.lastName,
-      profileImageUrl: row.profileImageUrl
-    }
-  }));
+  page.admins = [];
   
   // Get followers
   const followersResult = await pool.query(

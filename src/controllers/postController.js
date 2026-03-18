@@ -152,6 +152,210 @@ router.get('/feed', verifyToken, async (req, res) => {
   }
 });
 
+// Get trending hashtags
+router.get('/trending-tags', verifyToken, async (req, res) => {
+  const windowDays = Math.min(Math.max(parseInt(req.query.windowDays, 10) || 14, 1), 30);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 20);
+
+  try {
+    const result = await pool.query(
+      `WITH recent_posts AS (
+         SELECT p.id,
+                COALESCE(p.content, '') AS content
+         FROM "Post" p
+         JOIN "User" u ON p."userId" = u.id
+         WHERE p."isHidden" = false
+           AND p."createdAt" >= NOW() - ($1::int * INTERVAL '1 day')
+           AND u."isBlocked" = false
+           AND u."isDeleted" = false
+       ),
+       extracted AS (
+         SELECT rp.id AS "postId",
+                LOWER(tag_match[1]) AS tag
+         FROM recent_posts rp
+         CROSS JOIN LATERAL regexp_matches(rp.content, '#([A-Za-z0-9_]{2,50})', 'g') AS tag_match
+       ),
+       deduplicated AS (
+         SELECT DISTINCT "postId", tag
+         FROM extracted
+       )
+       SELECT tag,
+              COUNT(*)::int AS "postCount"
+       FROM deduplicated
+       GROUP BY tag
+       ORDER BY "postCount" DESC, tag ASC
+       LIMIT $2`,
+      [windowDays, limit]
+    );
+
+    const tags = result.rows.map((row) => ({
+      tag: `#${row.tag}`,
+      postCount: row.postCount,
+    }));
+
+    res.json({
+      tags,
+      windowDays,
+    });
+  } catch (error) {
+    console.error('Trending tags fetch error:', error);
+    res.status(500).json({ message: 'Unable to fetch trending tags.' });
+  }
+});
+
+// Get global posts by hashtag
+router.get('/hashtag/:tag', verifyToken, async (req, res) => {
+  const rawTag = String(req.params.tag || '').trim().toLowerCase();
+  const tag = rawTag.replace(/^#/, '');
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+  const windowDays = Math.min(Math.max(parseInt(req.query.windowDays, 10) || 30, 1), 90);
+
+  if (!/^[a-z0-9_]{2,50}$/i.test(tag)) {
+    return res.status(400).json({ message: 'Invalid hashtag.' });
+  }
+
+  try {
+    const regexPattern = `(^|[^A-Za-z0-9_])#${tag}([^A-Za-z0-9_]|$)`;
+    const result = await pool.query(
+      `SELECT p.id,
+              p.content,
+              p.feeling,
+              p."mediaType",
+              p."mediaUrl",
+              p."createdAt",
+              p."pageId",
+              u.id as "userId",
+              u."firstName",
+              u."lastName",
+              u."username",
+              u."profileImageUrl",
+              pg.id as "pageIdFull",
+              pg.name as "pageName",
+              pg."profileImageUrl" as "pageProfileImageUrl"
+       FROM "Post" p
+       JOIN "User" u ON p."userId" = u.id
+       LEFT JOIN "Page" pg ON p."pageId" = pg.id
+       WHERE p."isHidden" = false
+         AND p."createdAt" >= NOW() - ($1::int * INTERVAL '1 day')
+         AND u."isVerified" = true
+         AND u."isBlocked" = false
+         AND u."isDeleted" = false
+         AND COALESCE(p.content, '') ~* $2
+       ORDER BY p."createdAt" DESC
+       LIMIT $3`,
+      [windowDays, regexPattern, limit]
+    );
+
+    const posts = result.rows.map((row) => ({
+      id: row.id,
+      content: row.content,
+      feeling: row.feeling,
+      mediaType: row.mediaType,
+      mediaUrl: row.mediaUrl,
+      createdAt: row.createdAt,
+      pageId: row.pageId,
+      page: row.pageId
+        ? {
+            id: row.pageIdFull,
+            name: row.pageName,
+            profileImageUrl: row.pageProfileImageUrl,
+          }
+        : null,
+      userId: row.userId,
+      user: {
+        id: row.userId,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        username: row.username,
+        profileImageUrl: row.profileImageUrl,
+      },
+    }));
+
+    res.json({
+      hashtag: `#${tag}`,
+      posts,
+      windowDays,
+    });
+  } catch (error) {
+    console.error('Hashtag posts fetch error:', error);
+    res.status(500).json({ message: 'Unable to fetch hashtag posts.' });
+  }
+});
+
+// Search global posts by text
+router.get('/search', verifyToken, async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
+
+  if (q.length < 2) {
+    return res.status(400).json({ message: 'Search query must be at least 2 characters.' });
+  }
+
+  try {
+    const likePattern = `%${q}%`;
+    const result = await pool.query(
+      `SELECT p.id,
+              p.content,
+              p.feeling,
+              p."mediaType",
+              p."mediaUrl",
+              p."createdAt",
+              p."pageId",
+              u.id as "userId",
+              u."firstName",
+              u."lastName",
+              u."username",
+              u."profileImageUrl",
+              pg.id as "pageIdFull",
+              pg.name as "pageName",
+              pg."profileImageUrl" as "pageProfileImageUrl"
+       FROM "Post" p
+       JOIN "User" u ON p."userId" = u.id
+       LEFT JOIN "Page" pg ON p."pageId" = pg.id
+       WHERE p."isHidden" = false
+         AND u."isBlocked" = false
+         AND u."isDeleted" = false
+         AND COALESCE(p.content, '') ILIKE $1
+       ORDER BY p."createdAt" DESC
+       LIMIT $2`,
+      [likePattern, limit]
+    );
+
+    const posts = result.rows.map((row) => ({
+      id: row.id,
+      content: row.content,
+      feeling: row.feeling,
+      mediaType: row.mediaType,
+      mediaUrl: row.mediaUrl,
+      createdAt: row.createdAt,
+      pageId: row.pageId,
+      page: row.pageId
+        ? {
+            id: row.pageIdFull,
+            name: row.pageName,
+            profileImageUrl: row.pageProfileImageUrl,
+          }
+        : null,
+      userId: row.userId,
+      user: {
+        id: row.userId,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        username: row.username,
+        profileImageUrl: row.profileImageUrl,
+      },
+    }));
+
+    res.json({
+      query: q,
+      posts,
+    });
+  } catch (error) {
+    console.error('Post search error:', error);
+    res.status(500).json({ message: 'Unable to search posts.' });
+  }
+});
+
 // Get current user's own posts
 router.get('/my-posts', verifyToken, async (req, res) => {
   const userId = req.user.userId;
