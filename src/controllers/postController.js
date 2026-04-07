@@ -3,6 +3,11 @@ const router = express.Router();
 const { verifyToken } = require('../middlewares/authMiddleware');
 
 const pool = require('../config/db');
+const {
+  createNotification,
+  getUserById,
+  formatActorName,
+} = require('../services/notificationService');
 
 // Create a new post
 router.post('/', verifyToken, async (req, res) => {
@@ -436,6 +441,80 @@ router.get('/user/:userId', async (req, res) => {
   } catch (error) {
     console.error('Fetch user posts error:', error);
     res.status(500).json({ message: 'Unable to fetch posts' });
+  }
+});
+
+// Get single post by ID (for deep-linking from notifications/share links)
+router.get('/:postId', verifyToken, async (req, res) => {
+  const postId = Number(req.params.postId);
+
+  if (!postId || Number.isNaN(postId)) {
+    return res.status(400).json({ message: 'Invalid post id.' });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT p.id,
+              p.content,
+              p.feeling,
+              p."mediaType",
+              p."mediaUrl",
+              p."createdAt",
+              p."pageId",
+              u.id as "userId",
+              u."firstName",
+              u."lastName",
+              u."username",
+              u."profileImageUrl",
+              pg.id as "pageIdFull",
+              pg.name as "pageName",
+              pg."profileImageUrl" as "pageProfileImageUrl"
+       FROM "Post" p
+       JOIN "User" u ON p."userId" = u.id
+       LEFT JOIN "Page" pg ON p."pageId" = pg.id
+       WHERE p.id = $1
+         AND p."isHidden" = false
+         AND u."isVerified" = true
+         AND u."isBlocked" = false
+         AND u."isDeleted" = false
+       LIMIT 1`,
+      [postId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Post not found.' });
+    }
+
+    const row = result.rows[0];
+    const post = {
+      id: row.id,
+      content: row.content,
+      feeling: row.feeling,
+      mediaType: row.mediaType,
+      mediaUrl: row.mediaUrl,
+      createdAt: row.createdAt,
+      pageId: row.pageId,
+      page: row.pageId
+        ? {
+            id: row.pageIdFull,
+            name: row.pageName,
+            profileImageUrl: row.pageProfileImageUrl,
+          }
+        : null,
+      userId: row.userId,
+      user: {
+        id: row.userId,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        username: row.username,
+        profileImageUrl: row.profileImageUrl,
+      },
+    };
+
+    return res.json({ post });
+  } catch (error) {
+    console.error('Single post fetch error:', error);
+    return res.status(500).json({ message: 'Unable to fetch post.' });
   }
 });
 
@@ -1198,6 +1277,31 @@ router.post('/:postId/like', verifyToken, async (req, res) => {
       [postId, userId]
     );
 
+    const postOwnerResult = await pool.query(
+      `SELECT "userId" FROM "Post" WHERE id = $1 LIMIT 1`,
+      [postId]
+    );
+
+    const postOwnerId = postOwnerResult.rows[0]?.userId;
+    if (postOwnerId) {
+      try {
+        const actor = await getUserById(userId);
+        const actorName = formatActorName(actor) || 'Someone';
+
+        await createNotification({
+          userId: postOwnerId,
+          actorId: userId,
+          type: 'POST_LIKED',
+          title: 'New like on your post',
+          body: `${actorName} liked your post.`,
+          entityType: 'post',
+          entityId: Number(postId),
+        });
+      } catch (notificationError) {
+        console.error('Post like notification error:', notificationError?.message || notificationError);
+      }
+    }
+
     // Get updated like count
     const countResult = await pool.query(
       `SELECT COUNT(*) as count FROM "Like" WHERE "postId" = $1`,
@@ -1293,7 +1397,7 @@ router.post('/:postId/comments', verifyToken, async (req, res) => {
   try {
     // Verify post exists
     const postCheck = await pool.query(
-      `SELECT id FROM "Post" WHERE id = $1`,
+      `SELECT id, "userId" FROM "Post" WHERE id = $1`,
       [postId]
     );
 
@@ -1310,6 +1414,26 @@ router.post('/:postId/comments', verifyToken, async (req, res) => {
     );
 
     const comment = result.rows[0];
+    const postOwnerId = postCheck.rows[0]?.userId;
+
+    if (postOwnerId) {
+      try {
+        const actor = await getUserById(userId);
+        const actorName = formatActorName(actor) || 'Someone';
+
+        await createNotification({
+          userId: postOwnerId,
+          actorId: userId,
+          type: 'POST_COMMENTED',
+          title: 'New comment on your post',
+          body: `${actorName} commented on your post.`,
+          entityType: 'post',
+          entityId: Number(postId),
+        });
+      } catch (notificationError) {
+        console.error('Post comment notification error:', notificationError?.message || notificationError);
+      }
+    }
 
     // Get user details
     const userResult = await pool.query(

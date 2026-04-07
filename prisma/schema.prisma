@@ -49,6 +49,27 @@ enum PageReportReason {
   OTHER
 }
 
+enum FollowRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+enum NotificationType {
+  FOLLOW_REQUEST_RECEIVED
+  FOLLOW_REQUEST_ACCEPTED
+  POST_LIKED
+  POST_COMMENTED
+  SYSTEM
+}
+
+enum StoryMediaType {
+  IMAGE
+  VIDEO
+  TEXT
+}
+
 model User {
   id                Int      @id @default(autoincrement())
   firstName         String
@@ -73,12 +94,18 @@ model User {
   comments          Comment[]
   followers         Follow[] @relation("followers")
   following         Follow[] @relation("following")
+  sentFollowRequests     FollowRequest[] @relation("FollowRequestFromUser")
+  receivedFollowRequests FollowRequest[] @relation("FollowRequestToUser")
   pagesOwned        Page[]   @relation("PageOwner")
   pageFollowers     PageFollower[]
   pageReports       PageReport[]
   conversationsCreated Conversation[]            @relation("ConversationCreator")
   conversationParticipants ConversationParticipant[]
   sentMessages         Message[]                 @relation("MessageSender")
+  notificationsReceived Notification[]           @relation("NotificationRecipient")
+  notificationsCreated  Notification[]           @relation("NotificationActor")
+  stories             Story[]
+  storyViews          StoryView[]               @relation("StoryViewer")
 }
 
 model Post {
@@ -154,6 +181,22 @@ model Follow {
   @@unique([followerId, followingId])
 }
 
+model FollowRequest {
+  id         Int                 @id @default(autoincrement())
+  fromUserId Int
+  toUserId   Int
+  status     FollowRequestStatus @default(PENDING)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+  respondedAt DateTime?
+  fromUser   User                @relation("FollowRequestFromUser", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser     User                @relation("FollowRequestToUser", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([fromUserId, toUserId])
+  @@index([toUserId, status, createdAt])
+  @@index([fromUserId, status, createdAt])
+}
+
 model Page {
   id              Int      @id @default(autoincrement())
   name            String   @unique
@@ -207,6 +250,53 @@ model ContactQuery {
   message   String
   isRead    Boolean  @default(false)
   createdAt DateTime @default(now())
+}
+
+model Notification {
+  id         Int              @id @default(autoincrement())
+  userId     Int
+  actorId    Int?
+  type       NotificationType
+  title      String
+  body       String?
+  entityType String?
+  entityId   Int?
+  isRead     Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+  readAt     DateTime?
+  user       User             @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  actor      User?            @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([userId, isRead, createdAt])
+  @@index([userId, createdAt])
+}
+
+model Story {
+  id          Int            @id @default(autoincrement())
+  userId      Int
+  mediaType   StoryMediaType @default(TEXT)
+  mediaUrl    String?
+  textContent String?
+  background  String?
+  createdAt   DateTime       @default(now())
+  expiresAt   DateTime
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  views       StoryView[]
+
+  @@index([expiresAt])
+  @@index([userId, createdAt])
+}
+
+model StoryView {
+  id        Int      @id @default(autoincrement())
+  storyId   Int
+  viewerId  Int
+  viewedAt  DateTime @default(now())
+  story     Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewer    User     @relation("StoryViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([storyId, viewerId])
+  @@index([viewerId, viewedAt])
 }
 
 model Conversation {

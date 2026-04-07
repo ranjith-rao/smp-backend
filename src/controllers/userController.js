@@ -2,6 +2,18 @@ const express = require('express');
 const router = express.Router();
 const { verifyToken, isAdmin } = require('../middlewares/authMiddleware');
 const pool = require('../config/db');
+const {
+  createNotification,
+  getUserById,
+  formatActorName,
+} = require('../services/notificationService');
+
+const FOLLOW_REQUEST_STATUS = {
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED',
+  CANCELLED: 'CANCELLED',
+};
 
 // ===== PUBLIC ROUTES (No authentication required) =====
 
@@ -70,6 +82,11 @@ router.get('/new/suggestions', verifyToken, async (req, res) => {
          AND role != 'ADMIN'
          AND id != $2
          AND id NOT IN (SELECT "followingId" FROM "Follow" WHERE "followerId" = $2)
+         AND id NOT IN (
+           SELECT "toUserId"
+           FROM "FollowRequest"
+           WHERE "fromUserId" = $2 AND status = 'PENDING'
+         )
        ORDER BY "createdAt" DESC
        LIMIT $1`,
       [limit, userId]
@@ -115,11 +132,18 @@ router.post('/:id/follow', verifyToken, async (req, res) => {
   try {
     // Check if target user exists
     const userExists = await pool.query(
-      `SELECT id FROM "User" WHERE id = $1`,
+      `SELECT id, role, "isDeleted", "isBlocked"
+       FROM "User"
+       WHERE id = $1`,
       [id]
     );
 
     if (userExists.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const targetUser = userExists.rows[0];
+    if (targetUser.role === 'ADMIN' || targetUser.isDeleted || targetUser.isBlocked) {
       return res.status(404).json({ message: 'User not found' });
     }
 
@@ -133,13 +157,52 @@ router.post('/:id/follow', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'Already following this user' });
     }
 
-    // Create follow relationship
-    await pool.query(
-      `INSERT INTO "Follow" ("followerId", "followingId") VALUES ($1, $2)`,
+    // Create or re-open follow request (all user-user follows require approval)
+    const existingRequest = await pool.query(
+      `SELECT id, status
+       FROM "FollowRequest"
+       WHERE "fromUserId" = $1 AND "toUserId" = $2`,
       [followerId, id]
     );
 
-    res.status(201).json({ success: true, message: 'Successfully followed user' });
+    if (existingRequest.rows.length > 0) {
+      const request = existingRequest.rows[0];
+      if (request.status === FOLLOW_REQUEST_STATUS.PENDING) {
+        return res.status(400).json({ message: 'Follow request already sent', status: 'REQUESTED' });
+      }
+
+      await pool.query(
+        `UPDATE "FollowRequest"
+         SET status = $3, "respondedAt" = NULL, "updatedAt" = CURRENT_TIMESTAMP
+         WHERE id = $1 AND "fromUserId" = $2`,
+        [request.id, followerId, FOLLOW_REQUEST_STATUS.PENDING]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO "FollowRequest" ("fromUserId", "toUserId", status)
+         VALUES ($1, $2, $3)`,
+        [followerId, id, FOLLOW_REQUEST_STATUS.PENDING]
+      );
+    }
+
+    try {
+      const actor = await getUserById(followerId);
+      const actorName = formatActorName(actor) || 'Someone';
+
+      await createNotification({
+        userId: id,
+        actorId: followerId,
+        type: 'FOLLOW_REQUEST_RECEIVED',
+        title: 'New follow request',
+        body: `${actorName} sent you a follow request.`,
+        entityType: 'user',
+        entityId: Number(followerId),
+      });
+    } catch (notificationError) {
+      console.error('Follow request notification error:', notificationError?.message || notificationError);
+    }
+
+    res.status(201).json({ success: true, status: 'REQUESTED', message: 'Follow request sent' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -151,18 +214,249 @@ router.delete('/:id/follow', verifyToken, async (req, res) => {
   const followerId = req.user.userId;
 
   try {
-    const result = await pool.query(
+    const unfollowResult = await pool.query(
       `DELETE FROM "Follow" WHERE "followerId" = $1 AND "followingId" = $2 RETURNING id`,
       [followerId, id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Not following this user' });
+    if (unfollowResult.rows.length > 0) {
+      return res.json({ success: true, status: 'UNFOLLOWED', message: 'Successfully unfollowed user' });
     }
 
-    res.json({ success: true, message: 'Successfully unfollowed user' });
+    const cancelResult = await pool.query(
+      `UPDATE "FollowRequest"
+       SET status = $3, "respondedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE "fromUserId" = $1 AND "toUserId" = $2 AND status = $4
+       RETURNING id`,
+      [followerId, id, FOLLOW_REQUEST_STATUS.CANCELLED, FOLLOW_REQUEST_STATUS.PENDING]
+    );
+
+    if (cancelResult.rows.length > 0) {
+      return res.json({ success: true, status: 'REQUEST_CANCELLED', message: 'Follow request cancelled' });
+    }
+
+    return res.status(404).json({ message: 'No follow or pending request found' });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Get relationship with another user
+router.get('/:id/relationship', verifyToken, async (req, res) => {
+  const targetUserId = Number(req.params.id);
+  const currentUserId = Number(req.user.userId);
+
+  if (!targetUserId || Number.isNaN(targetUserId)) {
+    return res.status(400).json({ message: 'Invalid user id' });
+  }
+
+  if (targetUserId === currentUserId) {
+    return res.json({ relationship: 'SELF' });
+  }
+
+  try {
+    const followResult = await pool.query(
+      `SELECT id FROM "Follow" WHERE "followerId" = $1 AND "followingId" = $2 LIMIT 1`,
+      [currentUserId, targetUserId]
+    );
+
+    if (followResult.rows.length > 0) {
+      return res.json({ relationship: 'FOLLOWING' });
+    }
+
+    const outgoingResult = await pool.query(
+      `SELECT id FROM "FollowRequest"
+       WHERE "fromUserId" = $1 AND "toUserId" = $2 AND status = $3
+       LIMIT 1`,
+      [currentUserId, targetUserId, FOLLOW_REQUEST_STATUS.PENDING]
+    );
+
+    if (outgoingResult.rows.length > 0) {
+      return res.json({ relationship: 'REQUESTED', requestId: outgoingResult.rows[0].id });
+    }
+
+    const incomingResult = await pool.query(
+      `SELECT id FROM "FollowRequest"
+       WHERE "fromUserId" = $1 AND "toUserId" = $2 AND status = $3
+       LIMIT 1`,
+      [targetUserId, currentUserId, FOLLOW_REQUEST_STATUS.PENDING]
+    );
+
+    if (incomingResult.rows.length > 0) {
+      return res.json({ relationship: 'INCOMING_REQUEST', requestId: incomingResult.rows[0].id });
+    }
+
+    return res.json({ relationship: 'NONE' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Incoming follow requests for current user
+router.get('/follow-requests/incoming', verifyToken, async (req, res) => {
+  const currentUserId = req.user.userId;
+
+  try {
+    const result = await pool.query(
+      `SELECT
+          fr.id,
+          fr.status,
+          fr."createdAt",
+          fr."fromUserId",
+          u."firstName",
+          u."lastName",
+          u.username,
+          u.email,
+          u."profileImageUrl"
+       FROM "FollowRequest" fr
+       JOIN "User" u ON u.id = fr."fromUserId"
+       WHERE fr."toUserId" = $1
+         AND fr.status = $2
+         AND u."isDeleted" = false
+         AND u."isBlocked" = false
+         AND u.role != 'ADMIN'
+       ORDER BY fr."createdAt" DESC`,
+      [currentUserId, FOLLOW_REQUEST_STATUS.PENDING]
+    );
+
+    return res.json({ requests: result.rows });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Outgoing follow requests for current user
+router.get('/follow-requests/outgoing', verifyToken, async (req, res) => {
+  const currentUserId = req.user.userId;
+
+  try {
+    const result = await pool.query(
+      `SELECT
+          fr.id,
+          fr.status,
+          fr."createdAt",
+          fr."toUserId",
+          u."firstName",
+          u."lastName",
+          u.username,
+          u.email,
+          u."profileImageUrl"
+       FROM "FollowRequest" fr
+       JOIN "User" u ON u.id = fr."toUserId"
+       WHERE fr."fromUserId" = $1
+         AND fr.status = $2
+         AND u."isDeleted" = false
+         AND u."isBlocked" = false
+         AND u.role != 'ADMIN'
+       ORDER BY fr."createdAt" DESC`,
+      [currentUserId, FOLLOW_REQUEST_STATUS.PENDING]
+    );
+
+    return res.json({ requests: result.rows });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Accept incoming follow request
+router.patch('/follow-requests/:requestId/accept', verifyToken, async (req, res) => {
+  const requestId = Number(req.params.requestId);
+  const currentUserId = Number(req.user.userId);
+
+  if (!requestId || Number.isNaN(requestId)) {
+    return res.status(400).json({ message: 'Invalid request id' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const requestResult = await client.query(
+      `SELECT id, "fromUserId", "toUserId", status
+       FROM "FollowRequest"
+       WHERE id = $1 AND "toUserId" = $2
+       FOR UPDATE`,
+      [requestId, currentUserId]
+    );
+
+    if (requestResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Follow request not found' });
+    }
+
+    const request = requestResult.rows[0];
+    if (request.status !== FOLLOW_REQUEST_STATUS.PENDING) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Follow request is not pending' });
+    }
+
+    await client.query(
+      `UPDATE "FollowRequest"
+       SET status = $2, "respondedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [requestId, FOLLOW_REQUEST_STATUS.ACCEPTED]
+    );
+
+    await client.query(
+      `INSERT INTO "Follow" ("followerId", "followingId")
+       VALUES ($1, $2)
+       ON CONFLICT ("followerId", "followingId") DO NOTHING`,
+      [request.fromUserId, request.toUserId]
+    );
+
+    await client.query('COMMIT');
+
+    try {
+      const actor = await getUserById(currentUserId);
+      const actorName = formatActorName(actor) || 'Someone';
+
+      await createNotification({
+        userId: request.fromUserId,
+        actorId: currentUserId,
+        type: 'FOLLOW_REQUEST_ACCEPTED',
+        title: 'Follow request accepted',
+        body: `${actorName} accepted your follow request.`,
+        entityType: 'user',
+        entityId: Number(currentUserId),
+      });
+    } catch (notificationError) {
+      console.error('Follow accepted notification error:', notificationError?.message || notificationError);
+    }
+
+    return res.json({ success: true, status: 'ACCEPTED', message: 'Follow request accepted' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Reject incoming follow request
+router.patch('/follow-requests/:requestId/reject', verifyToken, async (req, res) => {
+  const requestId = Number(req.params.requestId);
+  const currentUserId = Number(req.user.userId);
+
+  if (!requestId || Number.isNaN(requestId)) {
+    return res.status(400).json({ message: 'Invalid request id' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE "FollowRequest"
+       SET status = $3, "respondedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE id = $1 AND "toUserId" = $2 AND status = $4
+       RETURNING id`,
+      [requestId, currentUserId, FOLLOW_REQUEST_STATUS.REJECTED, FOLLOW_REQUEST_STATUS.PENDING]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Pending follow request not found' });
+    }
+
+    return res.json({ success: true, status: 'REJECTED', message: 'Follow request rejected' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
